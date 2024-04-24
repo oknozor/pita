@@ -5,7 +5,8 @@ pub struct PtBuffer<'a, T: 'a> {
     adds: Vec<T>,
     pieces: Vec<Piece>,
     length: usize,
-    last_insert: Option<usize>,
+    last_idx: usize,
+    last_insert: Option<(usize, bool)>,
     last_remove: Option<Location>,
 }
 
@@ -46,9 +47,33 @@ impl<'a, T: 'a> PtBuffer<'a, T> {
             adds: vec![],
             pieces: vec![piece],
             length: src.len(),
+            last_idx: 0,
             last_insert: None,
             last_remove: None,
         }
+    }
+
+    pub fn push(&mut self, value: T) {
+        let reuse = self.pieces.last().map_or(false, |last| {
+            last.with_buffer == WithBuffer::Add && last.start + last.length == self.adds.len()
+        });
+
+        self.adds.push(value);
+
+        if reuse {
+            self.pieces.last_mut().unwrap().length += 1;
+        } else {
+            self.pieces.push(Piece {
+                start: self.adds.len() - 1,
+                length: 1,
+                with_buffer: WithBuffer::Add,
+            });
+        }
+
+        self.last_idx = self.length;
+        self.length += 1;
+        self.last_insert = Some((self.pieces.len() - 1, true));
+        self.last_remove = None;
     }
 
     pub fn insert(&mut self, at: usize, item: T) {
@@ -98,7 +123,7 @@ impl<'a, T: 'a> PtBuffer<'a, T> {
         match location {
             Location::Head(piece_idx) => {
                 let remove = {
-                    let mut piece = &mut self.pieces[piece_idx];
+                    let piece = &mut self.pieces[piece_idx];
                     piece.start += 1;
                     piece.length -= 1;
                     piece.length == 0
@@ -108,7 +133,7 @@ impl<'a, T: 'a> PtBuffer<'a, T> {
                     self.pieces.remove(piece_idx);
                 }
             }
-            Location::Tail(piece_idx, delta) => {
+            Location::Tail(piece_idx, _delta) => {
                 self.pieces[piece_idx].length -= 1;
             }
             Location::Middle(piece_idx, delta) => {
@@ -281,6 +306,32 @@ mod test {
                     start: 4,
                     length: 7,
                     with_buffer: crate::WithBuffer::Original,
+                }
+            ]
+        )
+    }
+
+    #[test]
+    fn should_push_to_buffer() {
+        let mut buf = PtBuffer::new(b"Hello");
+        buf.push(b' ');
+        buf.push(b'w');
+        buf.push(b'o');
+        buf.push(b'r');
+        buf.push(b'd');
+
+        assert_eq!(
+            buf.pieces,
+            [
+                Piece {
+                    start: 0,
+                    length: 5,
+                    with_buffer: crate::WithBuffer::Original,
+                },
+                Piece {
+                    start: 0,
+                    length: 5,
+                    with_buffer: crate::WithBuffer::Add,
                 }
             ]
         )
