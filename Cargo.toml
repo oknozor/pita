@@ -1,5 +1,8 @@
 [workspace]
 members = [
-  "crates/*"
+    "crates/*"
 ]
 resolver = "2"
+
+[workspace.dependencies]
+piece-table = { path = "crates/piece-table" }
