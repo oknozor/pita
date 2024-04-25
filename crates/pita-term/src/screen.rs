@@ -1,9 +1,9 @@
+use crossterm::style::{Color, Print};
+use crossterm::terminal::EnterAlternateScreen;
+use crossterm::{execute, queue, terminal};
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::io::{BufWriter, Stdout, Write};
-use crossterm::{execute, queue, terminal};
-use crossterm::style::{Color, Print};
-use crossterm::terminal::EnterAlternateScreen;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -14,7 +14,7 @@ pub const DEFAULT_BG: Color = Color::Rgb {
 };
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub(crate) struct Style(pub Color, pub Color);  // Fg, Bg
+pub(crate) struct Style(pub Color, pub Color); // Fg, Bg
 
 pub struct Screen {
     width: usize,
@@ -32,13 +32,7 @@ impl Screen {
         queue!(out, crossterm::cursor::SetCursorStyle::SteadyBar)?;
         terminal::enable_raw_mode()?;
         let (width, height) = terminal::size()?;
-        let buf = std::iter::repeat(Some((
-            Style(
-                Color::White,
-                DEFAULT_BG,
-            ),
-            " ".into(),
-        )))
+        let buf = std::iter::repeat(Some((Style(Color::White, DEFAULT_BG), " ".into())))
             .take(width as usize * height as usize)
             .collect();
 
@@ -56,10 +50,7 @@ impl Screen {
         let mut out = self.out.borrow_mut();
         let buf = self.buf.borrow();
 
-        let mut last_style = Style(
-            Color::White,
-            DEFAULT_BG,
-        );
+        let mut last_style = Style(Color::White, DEFAULT_BG);
 
         queue!(
             out,
@@ -67,7 +58,7 @@ impl Screen {
             crossterm::style::SetBackgroundColor(last_style.1),
             crossterm::cursor::Hide
         )
-            .unwrap();
+        .unwrap();
 
         // Write everything to the buffered output.
         for y in 0..self.height {
@@ -81,7 +72,7 @@ impl Screen {
                             crossterm::style::SetForegroundColor(style.0),
                             crossterm::style::SetBackgroundColor(style.1),
                         )
-                            .unwrap();
+                        .unwrap();
                         last_style = style;
                     }
                     queue!(out, Print(text)).unwrap();
@@ -93,7 +84,6 @@ impl Screen {
         let cursor_pos = self.cursor.get();
         queue!(out, crossterm::cursor::MoveTo(cursor_pos.0, cursor_pos.1)).unwrap();
         queue!(out, crossterm::cursor::Show).unwrap();
-
 
         // Make sure everything is written out from the buffer.
         out.flush().unwrap();
@@ -137,7 +127,7 @@ impl Screen {
                 Some((ref mut style, ref mut text)) => {
                     *style = Style(col, col);
                     text.clear();
-                    text.push_str(" ");
+                    text.push(' ');
                 }
                 _ => {
                     *cell = Some((Style(col, col), " ".into()));
@@ -185,7 +175,6 @@ impl Screen {
     }
 }
 
-
 impl Drop for Screen {
     fn drop(&mut self) {
         terminal::disable_raw_mode().unwrap();
@@ -197,7 +186,7 @@ impl Drop for Screen {
             terminal::LeaveAlternateScreen,
             crossterm::cursor::Show,
         )
-            .unwrap();
+        .unwrap();
         out.flush().unwrap();
     }
 }

@@ -1,15 +1,15 @@
-use std::{fs, io};
 use std::cmp::min;
 use std::io::stdout;
 use std::panic::{set_hook, take_hook};
+use std::{fs, io};
 
-use crossterm::{event, execute};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::Color;
 use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
-use tracing_subscriber::{EnvFilter, fmt};
+use crossterm::{event, execute};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter};
 
 use piece_table::PtBuffer;
 
@@ -55,7 +55,12 @@ impl Editor<'_> {
     fn main_loop(&mut self) -> io::Result<()> {
         self.draw_doc();
 
-        self.screen.draw(0, self.screen.height() - 1, &format!("offset: {}", self.screen.line_offset()), Style(Color::White, Color::Blue));
+        self.screen.draw(
+            0,
+            self.screen.height() - 1,
+            &format!("offset: {}", self.screen.line_offset()),
+            Style(Color::White, Color::Blue),
+        );
 
         let mut needs_redraw = false;
 
@@ -65,7 +70,12 @@ impl Editor<'_> {
                 self.draw_doc();
             };
 
-            self.screen.draw(0, self.screen.height() - 1, &format!("offset: {}", self.screen.line_offset()), Style(Color::White, Color::Blue));
+            self.screen.draw(
+                0,
+                self.screen.height() - 1,
+                &format!("offset: {}", self.screen.line_offset()),
+                Style(Color::White, Color::Blue),
+            );
             self.screen.present();
             if let Some(command) = read_char()? {
                 needs_redraw = match command {
@@ -88,7 +98,6 @@ impl Editor<'_> {
                     }
                     Command::DeleteForward => {
                         let idx = self.get_cursor_absolute_position();
-                        self.doc[idx];
                         self.doc.remove(idx);
 
                         true
@@ -114,34 +123,60 @@ impl Editor<'_> {
                     Command::WordLeft => {
                         let idx = self.get_cursor_absolute_position();
                         let mut redraw = false;
-                        let mut cs = vec![];
-                        let idx = self.doc.len() - idx;
-                        for c in self.doc.iter().rev() {
-                            redraw = redraw && self.cursor_left();
-                            cs.push(*c);
+                        if self.doc[idx.saturating_sub(1)].is_ascii_whitespace() {
+                            for c in self.doc.rev_range(self.doc.len() - idx..self.doc.len()) {
+                                if !c.is_ascii_whitespace() {
+                                    break;
+                                }
 
-                            if *c == b' ' {
-                                break
+                                redraw = redraw || self.cursor_left();
+                            }
+                        } else {
+                            for c in self.doc.rev_range(self.doc.len() - idx..self.doc.len()) {
+                                if c.is_ascii_whitespace() {
+                                    break;
+                                }
+
+                                redraw = redraw || self.cursor_left();
                             }
                         }
 
-                        let cow = String::from_utf8_lossy(&cs);
+                        redraw
+                    }
 
-                        panic!("{cow}");
+                    Command::WordRight => {
+                        let idx = self.get_cursor_absolute_position();
+                        let mut redraw = false;
+                        if self.doc[idx].is_ascii_whitespace() {
+                            for c in self.doc.range(idx..) {
+                                if !c.is_ascii_whitespace() {
+                                    break;
+                                }
+
+                                redraw = redraw || self.cursor_right();
+                            }
+                        } else {
+                            for c in self.doc.range(idx..) {
+                                if c.is_ascii_whitespace() {
+                                    break;
+                                }
+
+                                redraw = redraw || self.cursor_right();
+                            }
+                        }
+
                         redraw
                     }
                 };
             }
         }
 
-
         Ok(())
     }
 
     fn get_cursor_absolute_position(&self) -> usize {
         let (x, y) = self.screen.cursor();
-        let idx = self.doc.line_column_to_idx(x, y);
-        idx
+        self.doc.line_column_to_idx(x, y)
     }
 
     fn draw_doc(&mut self) {
@@ -156,11 +191,15 @@ impl Editor<'_> {
                 break;
             }
 
-
             if *byte == b'\n' {
                 self.line_endings.push(line.len() + 1);
                 column_count = 0;
-                self.screen.draw(column_count, line_count, &String::from_utf8_lossy(line.as_slice()), Style(Color::White, screen::DEFAULT_BG));
+                self.screen.draw(
+                    column_count,
+                    line_count,
+                    &String::from_utf8_lossy(line.as_slice()),
+                    Style(Color::White, screen::DEFAULT_BG),
+                );
                 line.clear();
                 line_count += 1;
                 continue;
@@ -205,7 +244,7 @@ impl Editor<'_> {
 
     pub(crate) fn cursor_down(&self) -> bool {
         let (mut x, mut y) = self.screen.cursor();
-        y = y + 1;
+        y += 1;
         let ending = self.line_endings[min(y, self.screen.height() - 1)];
         if x > ending {
             x = ending - 1;
@@ -243,12 +282,12 @@ impl Editor<'_> {
     }
 }
 
-
 enum Command {
     Quit,
     Char(char),
     MoveLeft,
     WordLeft,
+    WordRight,
     MoveRight,
     MoveDown,
     MoveUp,
@@ -260,27 +299,24 @@ enum Command {
 
 fn read_char() -> io::Result<Option<Command>> {
     match event::read()? {
-        Event::Key(e) => {
-            match e.kind {
-                KeyEventKind::Press => {
-                    Ok(Some(match e.code {
-                        KeyCode::Left if e.modifiers.contains(KeyModifiers::CONTROL) => Command::WordLeft,
-                        KeyCode::Left => Command::MoveLeft,
-                        KeyCode::Right => Command::MoveRight,
-                        KeyCode::Up => Command::MoveUp,
-                        KeyCode::Down => Command::MoveDown,
-                        KeyCode::Esc => Command::Quit,
-                        KeyCode::Char(c) => Command::Char(c),
-                        KeyCode::Enter => Command::NewLine,
-                        KeyCode::Delete => Command::DeleteForward,
-                        KeyCode::Backspace => Command::DeleteBackWard,
-                        KeyCode::Tab => Command::Tab,
-                        _ => return Ok(None),
-                    }))
-                }
-                _ => return Ok(None)
-            }
-        }
-        _ => return Ok(None)
+        Event::Key(e) => match e.kind {
+            KeyEventKind::Press => Ok(Some(match e.code {
+                KeyCode::Left if e.modifiers.contains(KeyModifiers::CONTROL) => Command::WordLeft,
+                KeyCode::Left => Command::MoveLeft,
+                KeyCode::Right if e.modifiers.contains(KeyModifiers::CONTROL) => Command::WordRight,
+                KeyCode::Right => Command::MoveRight,
+                KeyCode::Up => Command::MoveUp,
+                KeyCode::Down => Command::MoveDown,
+                KeyCode::Esc => Command::Quit,
+                KeyCode::Char(c) => Command::Char(c),
+                KeyCode::Enter => Command::NewLine,
+                KeyCode::Delete => Command::DeleteForward,
+                KeyCode::Backspace => Command::DeleteBackWard,
+                KeyCode::Tab => Command::Tab,
+                _ => return Ok(None),
+            })),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
     }
 }

@@ -18,7 +18,7 @@ enum Location {
     Head(PieceIdx),
     Middle(PieceIdx, Delta),
     Tail(PieceIdx, Delta),
-    EOF,
+    Eof,
 }
 
 /// Either the original immutable buffer or the add buffer.
@@ -123,23 +123,19 @@ impl<'a, T: 'a> PtBuffer<'a, T> {
 
     pub fn remove(&mut self, at: usize) {
         debug_assert!(at < self.length);
-        let piece_to_remove: Option<usize>;
 
-        match self.reusable_edit {
+        let piece_to_remove = match self.reusable_edit {
             ReusableEdit::Insert(piece_idx, head) if at + 1 == self.last_edit_idx && head => {
                 let piece = &mut self.pieces[piece_idx];
                 piece.length -= 1;
-                piece_to_remove = (piece.length == 0).then(|| piece_idx);
+                (piece.length == 0).then_some(piece_idx)
             }
-            ReusableEdit::Remove(loc) if at == self.last_edit_idx => {
-                println!("Reusable remove");
-                piece_to_remove = self.raw_remove(loc);
-            }
+            ReusableEdit::Remove(loc) if at == self.last_edit_idx => self.raw_remove(loc),
             _ => {
                 let loc = self.index_to_piece_loc(at);
-                piece_to_remove = self.raw_remove(loc);
+                self.raw_remove(loc)
             }
-        }
+        };
 
         if let Some(piece_idx) = piece_to_remove {
             self.pieces.remove(piece_idx);
@@ -162,6 +158,10 @@ impl<'a, T: 'a> PtBuffer<'a, T> {
 
     pub fn len(&self) -> usize {
         self.length
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
     }
 }
 
@@ -202,7 +202,7 @@ impl<'a, T: 'a> PtBuffer<'a, T> {
                 self.pieces.insert(piece_idx + 2, split);
                 self.reusable_edit = ReusableEdit::Insert(piece_idx + 1, false);
             }
-            Location::EOF => {
+            Location::Eof => {
                 let piece_idx = self.pieces.len();
 
                 self.pieces.push(Piece {
@@ -264,12 +264,11 @@ impl<'a, T: 'a> PtBuffer<'a, T> {
                     self.reusable_edit = ReusableEdit::Remove(loc);
                 }
             }
-            Location::EOF => {}
+            Location::Eof => {}
         }
 
         None
     }
-
 
     fn index_to_piece_loc(&self, idx: usize) -> Location {
         let mut acc = 0;
@@ -285,7 +284,7 @@ impl<'a, T: 'a> PtBuffer<'a, T> {
             acc += piece.length;
         }
 
-        Location::EOF
+        Location::Eof
     }
 
     pub(crate) fn get_buffer(&'a self, piece: &Piece) -> &'a [T] {
@@ -391,13 +390,11 @@ mod test {
         buf.remove(0);
         assert_eq!(
             buf.pieces,
-            [
-                Piece {
-                    start: 3,
-                    length: 8,
-                    with_buffer: crate::WithBuffer::Original,
-                },
-            ]
+            [Piece {
+                start: 3,
+                length: 8,
+                with_buffer: crate::WithBuffer::Original,
+            },]
         )
     }
 
@@ -413,7 +410,7 @@ mod test {
                 start: 0,
                 length: 8,
                 with_buffer: crate::WithBuffer::Original,
-            }, ]
+            },]
         )
     }
 
