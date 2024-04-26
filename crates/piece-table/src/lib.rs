@@ -42,7 +42,7 @@ enum ReusableEdit {
     None,
 }
 
-impl<'a> PtBuffer<'a, u8> {
+impl<'a> PtBuffer<'a, String> {
     pub fn line_column_to_idx(&self, column: usize, line: usize) -> usize {
         let mut l_count = 0;
         let mut c_count = 0;
@@ -56,7 +56,7 @@ impl<'a> PtBuffer<'a, u8> {
                 c_count += 1;
             }
 
-            if c == &b'\n' {
+            if *c == "\n" {
                 l_count += 1;
             }
         }

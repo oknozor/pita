@@ -19,30 +19,37 @@ pub(crate) struct Style(pub Color, pub Color); // Fg, Bg
 pub struct Screen {
     width: usize,
     height: usize,
+    offset_x: usize,
+    offset_y: usize,
     out: RefCell<BufWriter<Stdout>>,
     buf: RefCell<Vec<Option<(Style, String)>>>,
     cursor: Cell<(u16, u16)>,
     line_offset: Cell<usize>,
+    bg: Color
 }
 
 impl Screen {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(width: usize, height: usize, x: usize, y: usize, bg: Color) -> io::Result<Self> {
+        // TODO: produce error if size + offset < terminal size
         let mut out = BufWriter::new(io::stdout());
         execute!(out, EnterAlternateScreen)?;
+        // execute!(out, crossterm::event::EnableMouseCapture)?;
         queue!(out, crossterm::cursor::SetCursorStyle::SteadyBar)?;
         terminal::enable_raw_mode()?;
-        let (width, height) = terminal::size()?;
-        let buf = std::iter::repeat(Some((Style(Color::White, DEFAULT_BG), " ".into())))
+        let buf = std::iter::repeat(Some((Style(Color::White, bg), " ".into())))
             .take(width as usize * height as usize)
             .collect();
 
         Ok(Self {
-            width: width as usize,
-            height: height as usize,
+            width,
+            height,
+            offset_x: x,
+            offset_y: y,
             out: RefCell::new(out),
             buf: RefCell::new(buf),
-            cursor: Cell::new((0, 0)),
+            cursor: Cell::new((x as u16, y as u16)),
             line_offset: Cell::new(0),
+            bg,
         })
     }
 
@@ -58,21 +65,23 @@ impl Screen {
             crossterm::style::SetBackgroundColor(last_style.1),
             crossterm::cursor::Hide
         )
-        .unwrap();
+            .unwrap();
 
         // Write everything to the buffered output.
         for y in 0..self.height {
             let mut x = 0;
             while x < self.width {
                 if let Some((style, ref text)) = buf[y * self.width + x] {
-                    queue!(out, crossterm::cursor::MoveTo(x as u16, y as u16)).unwrap();
+                    let x_pos = x + self.offset_x;
+                    let y_pos = y + self.offset_y;
+                    queue!(out, crossterm::cursor::MoveTo(x_pos as u16, y_pos as u16)).unwrap();
                     if style != last_style {
                         queue!(
                             out,
                             crossterm::style::SetForegroundColor(style.0),
                             crossterm::style::SetBackgroundColor(style.1),
                         )
-                        .unwrap();
+                            .unwrap();
                         last_style = style;
                     }
                     queue!(out, Print(text)).unwrap();
@@ -138,17 +147,17 @@ impl Screen {
 
     pub fn set_cursor(&self, x: usize, y: usize) {
         self.cursor.set((
-            x.min((self.width).saturating_sub(1)) as u16,
-            y.min((self.height).saturating_sub(1)) as u16,
+            (x + self.offset_x).min((self.width + self.offset_x).saturating_sub(1)) as u16,
+            (y + self.offset_y).min((self.height + self.offset_y).saturating_sub(1)) as u16,
         ));
-    }
-
-    pub fn len(&self) -> usize {
-        self.height * self.width
     }
 
     pub fn height(&self) -> usize {
         self.height
+    }
+
+    pub fn size(&self) -> usize {
+        self.height * self.width
     }
 
     pub fn width(&self) -> usize {
@@ -157,7 +166,7 @@ impl Screen {
 
     pub fn cursor(&self) -> (usize, usize) {
         let (x, y) = self.cursor.get();
-        (x as usize, y as usize)
+        (x as usize - self.offset_x, y as usize - self.offset_y)
     }
 
     pub fn line_offset(&self) -> usize {
@@ -186,7 +195,7 @@ impl Drop for Screen {
             terminal::LeaveAlternateScreen,
             crossterm::cursor::Show,
         )
-        .unwrap();
+            .unwrap();
         out.flush().unwrap();
     }
 }

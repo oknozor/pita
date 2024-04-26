@@ -10,5 +10,5 @@ crossterm = "0.27.0"
 piece-table.workspace = true
 unicode-segmentation = "1.11.0"
 unicode-width = "0.1.11"
-tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tree-sitter-highlight = "0.22.5"
+tree-sitter-rust = "0.21.2"
