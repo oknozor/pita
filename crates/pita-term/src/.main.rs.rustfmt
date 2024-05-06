@@ -1,0 +1,470 @@
+use std::{fs, io};
+use std::cmp::min;
+use std::io::stdout;
+use std::panic::{set_hook, take_hook};
+
+use crossterm::{event, execute, terminal};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::style::Color;
+use crossterm::terminal::{disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use tree_sitter_highlight::{Error, HighlightConfiguration, Highlighter, HighlightEvent};
+
+use piece_table::PtBuffer;
+use crate::hl::HlQueue;
+
+use crate::screen::{Screen, Style};
+
+mod screen;
+mod hl;
+
+struct Editor<'a> {
+    doc: PtBuffer<'a, u8>,
+    highlighter: Highlighter,
+    rust_config: HighlightConfiguration,
+    highlight: HlQueue,
+    screen: Screen,
+    log_screen: Screen,
+    log_buffer: Vec<String>,
+    line_endings: Vec<usize>,
+}
+
+fn main() -> io::Result<()> {
+    init_panic_hook();
+
+    execute!(stdout(), EnterAlternateScreen)?;
+    // execute!(stdout(), event::EnableMouseCapture)?;
+
+    let args: Vec<String> = std::env::args().collect();
+    let file = fs::read_to_string(&args[1])?;
+    let (width, height) = terminal::size()?;
+
+    let log_screen_height = 4;
+    let editor_height = height as usize - log_screen_height;
+    let width = width as usize;
+    let offset_x = 0;
+    let offset_y = 0;
+    let log_buffer = vec![
+        format!("Terminal size ({width}, {height})"),
+        format!("Editor dimension ({width}, {editor_height})"),
+        format!("Log dimension ({width}, {log_screen_height})"),
+    ];
+    let mut highlighter = Highlighter::new();
+
+
+    let rust = tree_sitter_rust::language();
+
+    let mut rust_config = HighlightConfiguration::new(
+        rust,
+        "rust",
+        tree_sitter_rust::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    ).unwrap();
+
+    let hl_names: Vec<String> = rust_config.query.capture_names().iter()
+        .map(|s| s.to_string())
+        .collect();
+    rust_config.configure(&hl_names);
+
+    let doc = PtBuffer::new(file.as_bytes());
+    let doc_len = doc.len();
+
+    let mut editor = Editor {
+        doc,
+        highlighter,
+        rust_config,
+        highlight: HlQueue::with_capacity(doc_len),
+        screen: Screen::new(width, editor_height, offset_x, offset_y, screen::DEFAULT_BG)?,
+        log_screen: Screen::new(width, log_screen_height, offset_x, editor_height, Color::Black)?,
+        log_buffer,
+        line_endings: vec![],
+    };
+
+    editor.main_loop()
+}
+
+
+pub fn init_panic_hook() {
+    let original_hook = take_hook();
+    set_hook(Box::new(move |panic_info| {
+        disable_raw_mode().unwrap();
+        execute!(stdout(), LeaveAlternateScreen).unwrap();
+        original_hook(panic_info);
+    }));
+}
+
+impl Editor<'_> {
+    fn main_loop(&mut self) -> io::Result<()> {
+        self.update_highlights();
+        self.draw_doc();
+        self.draw_logs();
+
+        let mut needs_redraw = false;
+
+        loop {
+            if needs_redraw {
+                self.screen.clear(screen::DEFAULT_BG);
+                self.update_highlights();
+                self.log_buffer.push(format!("doc size {}", self.doc.len()));
+
+                self.draw_doc();
+            };
+            self.log_screen.clear(Color::Black);
+            self.draw_logs();
+
+            self.log_screen.present();
+            self.screen.present();
+            if let Some(command) = read_char()? {
+                self.log_buffer.push(format!("Command: ({command:?})"));
+
+                needs_redraw = match command {
+                    Command::Quit => break,
+                    Command::MoveLeft => self.cursor_left(),
+                    Command::MoveRight => self.cursor_right(),
+                    Command::MoveDown => self.cursor_down(),
+                    Command::MoveUp => self.cursor_up(),
+                    Command::NewLine => {
+                        let idx = self.get_cursor_absolute_position();
+                        self.doc.insert(idx, b'\n');
+                        self.cursor_next_line();
+                        true
+                    }
+                    Command::Char(c) => {
+                        let (x, y) = self.screen.cursor();
+                        let idx = self.doc.line_column_to_idx(x, y);
+                        self.doc.insert(idx, c as u8);
+                        self.line_endings[y] += 1;
+                        self.log_buffer.push(format!("ending {} cursor {:?}", self.line_endings[y], self.screen.cursor()));
+
+                        self.cursor_right();
+                        true
+                    }
+                    Command::DeleteForward => {
+                        let idx = self.get_cursor_absolute_position();
+                        self.doc.remove(idx);
+
+                        true
+                    }
+                    Command::DeleteBackWard => {
+                        let idx = self.get_cursor_absolute_position();
+                        if idx == 0 {
+                            continue;
+                        }
+
+                        self.doc.remove(idx - 1);
+                        self.cursor_left();
+
+                        true
+                    }
+                    Command::Tab => {
+                        let idx = self.get_cursor_absolute_position();
+                        self.doc.insert(idx, b' ');
+                        self.doc.insert(idx, b' ');
+
+                        true
+                    }
+                    Command::WordLeft => {
+                        let idx = self.get_cursor_absolute_position();
+                        let mut redraw = false;
+                        if self.doc[idx.saturating_sub(1)].is_ascii_whitespace() {
+                            for c in self.doc.rev_range(self.doc.len() - idx..self.doc.len()) {
+                                if !c.is_ascii_whitespace() {
+                                    break;
+                                }
+
+                                redraw = redraw || self.cursor_left();
+                            }
+                        } else {
+                            for c in self.doc.rev_range(self.doc.len() - idx..self.doc.len()) {
+                                if c.is_ascii_whitespace() {
+                                    break;
+                                }
+
+                                redraw = redraw || self.cursor_left();
+                            }
+                        }
+
+                        redraw
+                    }
+
+                    Command::WordRight => {
+                        let idx = self.get_cursor_absolute_position();
+                        let mut redraw = false;
+                        if self.doc[idx].is_ascii_whitespace() {
+                            for c in self.doc.range(idx..) {
+                                if !c.is_ascii_whitespace() {
+                                    break;
+                                }
+
+                                redraw = redraw || self.cursor_right();
+                            }
+                        } else {
+                            for c in self.doc.range(idx..) {
+                                if c.is_ascii_whitespace() {
+                                    break;
+                                }
+
+                                redraw = redraw || self.cursor_right();
+                            }
+                        }
+
+                        redraw
+                    }
+
+                    Command::Mouse(e) => {
+                        self.log_buffer.push(format!("{e:?}"));
+                        false
+                    }
+                };
+            }
+        }
+
+        Ok(())
+    }
+
+    fn update_highlights(&mut self) {
+        let doc: Vec<u8> = self.doc.iter().copied().collect();
+        let highlights = self.highlighter.highlight(
+            &self.rust_config,
+            doc.as_slice(),
+            None,
+            |_| None,
+        ).unwrap();
+        let mut next_hl = vec![];
+        let mut next_range = vec![];
+        self.highlight.clear();
+        for event in highlights {
+            match event.unwrap() {
+                HighlightEvent::Source { start, end } => {
+                    next_range.push((start, end));
+                }
+                HighlightEvent::HighlightStart(t) => {
+                    next_hl.push(t);
+                }
+                HighlightEvent::HighlightEnd => {
+                    if let Some((hl, (start, end))) = next_hl.pop().zip(next_range.pop()) {
+                        self.highlight.push((start, end, hl.0));
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_cursor_absolute_position(&self) -> usize {
+        let (x, y) = self.screen.cursor();
+        self.doc.line_column_to_idx(x, y)
+    }
+
+    fn draw_logs(&mut self) {
+        for (idx, log_line) in self.log_buffer.iter().rev().enumerate() {
+            if idx > self.log_screen.height() {
+                break;
+            }
+
+            let w = self.log_screen.width();
+            let log_line = if log_line.len() > w {
+                &log_line[..w]
+            } else {
+                &log_line
+            };
+
+            self.log_screen.draw(0, idx, &format!("{idx} - {log_line}"), Style(Color::Red, Color::Black));
+        }
+    }
+    // Draw only a portion of the doc to fill the current screen
+    fn draw_doc(&mut self) {
+        let mut line_count = 0;
+        let mut column_count = 0;
+        let mut line_ending = 0;
+
+        let start = self.doc.line_column_to_idx(0, self.screen.line_offset());
+        self.line_endings.clear();
+        let mut queue: Vec<&usize> = self.highlight.iter()
+            .map(|(_, _, b)| b)
+            .collect();
+        queue.dedup_by(|h, o| o == h);
+        self.log_buffer.push(format!("{:?}", queue));
+
+        let mut current_line = Vec::with_capacity(self.screen.width());
+        let mut current_hl: Option<usize> = self.highlight.get(start);
+        let mut color = hl_to_color(current_hl);
+        for (idx, byte) in self.doc.range(start..).enumerate() {
+            if line_count > self.screen.height() {
+                break;
+            }
+            let next_hl: Option<usize> = self.highlight.get(start + idx);
+            // push byte to the current line buffer
+            current_line.push(*byte);
+
+
+            // if the current highlight changed, drain the line buffer
+            // and write it to the screen
+            if current_hl != next_hl {
+                let text = current_line.drain(..);
+                line_ending += text.len();
+
+                self.screen.draw(
+                    column_count,
+                    line_count,
+                    &String::from_utf8_lossy(text.as_slice()),
+                    Style(color, screen::DEFAULT_BG),
+                );
+
+                current_hl = next_hl;
+                column_count += text.len();
+                color = hl_to_color(current_hl);
+            }
+
+
+            if *byte == b'\n' {
+                let text = current_line.drain(..);
+                line_ending += text.len();
+                self.line_endings.push(line_ending);
+                self.screen.draw(
+                    column_count,
+                    line_count,
+                    &String::from_utf8_lossy(text.as_slice()),
+                    Style(Color::White, screen::DEFAULT_BG),
+                );
+                column_count = 0;
+                line_ending = 0;
+                line_count += 1;
+                continue;
+            }
+        }
+    }
+
+    pub(crate) fn cursor_left(&self) -> bool {
+        let (x, y) = self.screen.cursor();
+        if x == 0 {
+            let y = y.saturating_sub(1);
+            let x = self.line_endings[y];
+            self.screen.set_cursor(x.saturating_sub(1), y);
+            true
+        } else {
+            self.screen.set_cursor(x.saturating_sub(1), y);
+            false
+        }
+    }
+
+    pub(crate) fn cursor_right(&self) -> bool {
+        let (x, y) = self.screen.cursor();
+        let ending = self.line_endings[min(y, self.screen.height() - 2)];
+        if x >= ending - 1 {
+            let y = y + 1;
+            let x = 0;
+            self.screen.set_cursor(x, y);
+            true
+        } else {
+            self.screen.set_cursor(x + 1, y);
+            false
+        }
+    }
+
+    pub(crate) fn cursor_next_line(&self) -> bool {
+        let (_, y) = self.screen.cursor();
+        self.screen.set_cursor(0, y + 1);
+        true
+    }
+
+    pub(crate) fn cursor_down(&self) -> bool {
+        let (mut x, mut y) = self.screen.cursor();
+        y += 1;
+        let ending_idx = min(y, self.screen.height() - 1);
+
+        if let Some(ending) = self.line_endings.get(ending_idx) {
+            if x > *ending {
+                x = ending - 1;
+            }
+
+            let redraw = if y > self.screen.height() - 1 {
+                self.screen.inc_offset();
+                true
+            } else {
+                false
+            };
+
+            self.screen.set_cursor(x, y);
+            return redraw;
+        }
+
+        false
+    }
+
+    pub(crate) fn cursor_up(&self) -> bool {
+        let (mut x, mut y) = self.screen.cursor();
+        y = y.saturating_sub(1);
+        let ending_idx = min(y, self.screen.height() - 1);
+        let ending = self.line_endings.get(ending_idx).copied().unwrap_or_default();
+        if x > ending {
+            x = ending - 1;
+        }
+
+        let redraw = if y == 0 {
+            self.screen.dec_offset();
+            true
+        } else {
+            false
+        };
+
+        self.screen.set_cursor(x, y);
+        redraw
+    }
+}
+
+
+#[derive(Debug)]
+enum Command {
+    Quit,
+    Char(char),
+    MoveLeft,
+    WordLeft,
+    WordRight,
+    MoveRight,
+    MoveDown,
+    MoveUp,
+    NewLine,
+    DeleteForward,
+    DeleteBackWard,
+    Tab,
+    Mouse(MouseEvent),
+}
+
+fn read_char() -> io::Result<Option<Command>> {
+    match event::read()? {
+        Event::Key(e) => match e.kind {
+            KeyEventKind::Press => Ok(Some(match e.code {
+                KeyCode::Left if e.modifiers.contains(KeyModifiers::CONTROL) => Command::WordLeft,
+                KeyCode::Left => Command::MoveLeft,
+                KeyCode::Right if e.modifiers.contains(KeyModifiers::CONTROL) => Command::WordRight,
+                KeyCode::Right => Command::MoveRight,
+                KeyCode::Up => Command::MoveUp,
+                KeyCode::Down => Command::MoveDown,
+                KeyCode::Esc => Command::Quit,
+                KeyCode::Char(c) => Command::Char(c),
+                KeyCode::Enter => Command::NewLine,
+                KeyCode::Delete => Command::DeleteForward,
+                KeyCode::Backspace => Command::DeleteBackWard,
+                KeyCode::Tab => Command::Tab,
+                _ => return Ok(None),
+            })),
+            _ => Ok(None),
+        },
+        Event::Mouse(event) => Ok(Some(Command::Mouse(event))),
+        _ => Ok(None),
+    }
+}
+
+fn hl_to_color(current_hl: Option<usize>) -> Color {
+    match current_hl {
+        Some(0) => Color::from((129, 200, 190)),// Types
+        Some(10) => Color::from((239, 159, 118)),// Brackets
+        Some(14) => Color::from((234, 153, 156)), // Keywords
+        Some(11) => Color::from((231, 130, 132)), // Punctuation
+        Some(13) => Color::from((244, 184, 228)), // Lifetime
+        Some(4) => Color::from((229, 200, 144)), // Imported types
+        Some(20) => Color::from((202, 158, 230)), // Ref + lifetime punct
+        _ => Color::White,
+    }
+}
+

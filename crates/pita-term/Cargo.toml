@@ -6,9 +6,12 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-crossterm = "0.27.0"
+crossterm = { version = "0.27.0", features = ["events", "event-stream"] }
 piece-table.workspace = true
 unicode-segmentation = "1.11.0"
 unicode-width = "0.1.11"
 tree-sitter-highlight = "0.22.5"
 tree-sitter-rust = "0.21.2"
+tokio = { version = "1.9.0", features =["full"] }
+futures-timer = "3.0.3"
+futures = "0.3.30"

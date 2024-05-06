@@ -56,12 +56,12 @@ impl<'a> PtBuffer<'a, String> {
                 c_count += 1;
             }
 
-            if *c == "\n" {
+            if *c == "\n" && l_count < line {
                 l_count += 1;
             }
         }
 
-        panic!("(x:{column}, y:{line}) out of bound");
+        panic!("x: {c_count}, y: {l_count}, (x:{column}, y:{line}) out of bound");
     }
 }
 

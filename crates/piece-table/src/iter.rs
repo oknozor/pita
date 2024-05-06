@@ -21,7 +21,6 @@ pub struct RevRange<'a, T: 'a> {
     to: usize,
 }
 
-
 pub struct Range<'a, T: 'a> {
     iter: Iter<'a, T>,
     idx: usize,
